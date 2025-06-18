@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+from pymongo import MongoClient
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -19,8 +20,13 @@ current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
 
-# In-memory activity database
-activities = {
+# Conectar ao MongoDB
+mongo_client = MongoClient("mongodb://localhost:27017/")
+db = mongo_client["mergington_high"]
+activities_collection = db["activities"]
+
+# Dados iniciais das atividades para pré-popular o banco de dados
+initial_activities = {
     "Chess Club": {
         "description": "Learn strategies and compete in chess tournaments",
         "schedule": "Fridays, 3:30 PM - 5:00 PM",
@@ -80,6 +86,21 @@ activities = {
     }
 }
 
+# Função para inicializar o banco de dados com os dados pré-definidos
+def initialize_database():
+    # Limpar a coleção existente
+    activities_collection.delete_many({})
+    
+    # Inserir as atividades iniciais, usando o nome como _id
+    for activity_name, activity_data in initial_activities.items():
+        activities_collection.insert_one({
+            "_id": activity_name,
+            **activity_data
+        })
+
+# Inicializar o banco de dados na inicialização do aplicativo
+initialize_database()
+
 
 @app.get("/")
 def root():
@@ -88,22 +109,53 @@ def root():
 
 @app.get("/activities")
 def get_activities():
-    return activities
+    # Buscar todas as atividades do MongoDB e convertê-las para o formato esperado pela UI
+    activities_list = list(activities_collection.find({}))
+    
+    # Converter o formato do MongoDB para o formato do dicionário original
+    activities_dict = {}
+    for activity in activities_list:
+        activity_name = activity.pop("_id")  # Remove e pega o _id como nome da atividade
+        activities_dict[activity_name] = activity
+    
+    return activities_dict
 
 
 @app.post("/activities/{activity_name}/signup")
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
     # Validate activity exists
-    if activity_name not in activities:
+    activity = activities_collection.find_one({"_id": activity_name})
+    if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
 
-    # Get the specific activity
-    activity = activities[activity_name]
-
-    # Add student
     # Validate student is not already signed up
     if email in activity["participants"]:
         raise HTTPException(status_code=400, detail="Already signed up for this activity")
-    activity["participants"].append(email)
+    
+    # Add student to the participants list
+    activities_collection.update_one(
+        {"_id": activity_name},
+        {"$push": {"participants": email}}
+    )
+    
     return {"message": f"Signed up {email} for {activity_name}"}
+
+
+@app.delete("/activities/{activity_name}/unregister")
+def unregister_from_activity(activity_name: str, email: str):
+    """Remove a student from an activity"""
+    activity = activities_collection.find_one({"_id": activity_name})
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    
+    if email not in activity["participants"]:
+        raise HTTPException(status_code=404, detail="Participant not found in this activity")
+    
+    # Remove student from the participants list
+    activities_collection.update_one(
+        {"_id": activity_name},
+        {"$pull": {"participants": email}}
+    )
+    
+    return {"message": f"{email} removed from {activity_name}"}
